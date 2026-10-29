@@ -1,0 +1,273 @@
+# name: test/sql/gloss_witnesses.test
+# description: witnesses adjudicate the slots at read; GLOSSARY() discloses every gap, ATTEST() every verdict
+# group: [sql]
+
+require gloss
+
+require json
+
+require parquet
+
+require ducklake
+
+statement ok
+ATTACH 'ducklake::memory:' AS ws (DATA_PATH '{TEST_DIR}/gloss_witnesses_lake/');
+
+statement ok
+USE ws;
+
+statement ok
+PRAGMA gloss;
+
+statement ok
+DECLARE DATASET fin SET (purpose: 'witnesses');
+
+statement ok
+USE fin;
+
+statement ok
+CREATE TABLE fin.orders AS SELECT i AS id, i * 1.5 AS amount FROM range(4) t(i);
+
+statement ok
+DECLARE ASPECT behavior WITH $${"type": "object", "properties": {"value": {"enum": ["stock", "flow"]}}}$$ AS FACT ON COLUMN;
+
+# a detector is a function without RETURNS: one (subject, band, score) row per subject over its witness's slots
+statement ok
+DECLARE FUNCTION behavior_entropy FOR fin AS $$
+  SELECT subject,
+         CASE WHEN count(DISTINCT body->>'value') > 1 THEN 'red' ELSE 'green' END AS band,
+         CASE WHEN count(DISTINCT body->>'value') > 1 THEN 1.0 ELSE 0.0 END AS score
+  FROM slots WHERE speaker IN ('agent', 'human') GROUP BY subject
+$$;
+
+statement ok
+DECLARE WITNESS behavior_w ON behavior BY (AGENT, HUMAN) DETECTOR behavior_entropy THRESHOLD 0.7;
+
+query TTTTR
+SELECT name, aspect, speakers, detector, threshold FROM glossql.witnesses;
+----
+behavior_w	behavior	[AGENT, HUMAN]	behavior_entropy	0.7
+
+# --- what a witness refuses
+
+statement error
+DECLARE WITNESS w2 ON nothing BY (AGENT);
+----
+aspect 'nothing' is not declared
+
+statement error
+DECLARE WITNESS w3 ON behavior;
+----
+names BY or DETECTOR
+
+statement error
+DECLARE WITNESS w4 ON behavior THRESHOLD 2;
+----
+THRESHOLD is in 0..1
+
+statement ok
+DECLARE ASPECT min_max WITH $${"type": "object"}$$ AS MEASUREMENT ON COLUMN;
+
+statement error
+DECLARE WITNESS w5 ON min_max BY (AGENT);
+----
+BY is refused on a MEASUREMENT aspect
+
+statement ok
+DECLARE FUNCTION min_max FOR GLOBAL AS $$ SELECT min(v) AS min, max(v) AS max FROM subject_column($subject) $$ RETURNS min_max;
+
+statement error
+DECLARE WITNESS w6 ON behavior DETECTOR min_max;
+----
+a measurement, not a detector
+
+statement error
+DECLARE WITNESS w7 ON behavior DETECTOR nothing;
+----
+detector 'nothing' is not a declared function
+
+# --- before anybody spoke: unassessed, every gap visible (SPEC §5.3)
+
+query TTTTTT
+SELECT subject, aspect, value, band, score, state FROM GLOSSARY(orders);
+----
+fin.orders.amount	behavior	NULL	NULL	NULL	unassessed
+fin.orders.id	behavior	NULL	NULL	NULL	unassessed
+
+query I
+SELECT count(*) FROM ATTEST();
+----
+0
+
+# --- one voice: current, judged green
+
+statement ok
+GLOSS behavior ON orders.amount AS $${"value": "flow"}$$;
+
+query TTTTTT
+SELECT subject, aspect, value, band, score, state FROM GLOSSARY(orders);
+----
+fin.orders.amount	behavior	{"value": "flow"}	green	0.0	current
+fin.orders.id	behavior	NULL	NULL	NULL	unassessed
+
+# --- two voices disagree: contested, the value withheld, the verdict says how badly
+
+statement ok
+SET VARIABLE gloss_actor = 'human';
+
+statement ok
+GLOSS behavior ON orders.amount AS $${"value": "stock"}$$;
+
+statement ok
+RESET VARIABLE gloss_actor;
+
+query TTTTT
+SELECT subject, aspect, value, band, state FROM GLOSSARY(orders.amount);
+----
+fin.orders.amount	behavior	NULL	red	contested
+
+query TTTTR
+SELECT subject, aspect, witness, band, score FROM ATTEST(orders.amount::behavior);
+----
+fin.orders.amount	behavior	behavior_w	red	1.0
+
+query TTTTT
+SELECT subject, aspect, witness, band, current FROM ATTEST() WHERE band = 'red';
+----
+fin.orders.amount	behavior	behavior_w	red	true
+
+# the raw read shows every slot with its aspect's kind and its witness
+query TTTTT
+SELECT subject, aspect, kind, witness, actor FROM GLOSSARY(orders.amount, all => true) ORDER BY actor;
+----
+fin.orders.amount	behavior	FACT	behavior_w	agent
+fin.orders.amount	behavior	FACT	behavior_w	human
+
+# --- the human re-glosses to agree: the human slot is superseded, current again
+
+statement ok
+SET VARIABLE gloss_actor = 'human';
+
+statement ok
+GLOSS behavior ON orders.amount AS $${"value": "flow"}$$;
+
+statement ok
+RESET VARIABLE gloss_actor;
+
+query TTTT
+SELECT subject, value, band, state FROM GLOSSARY(orders.amount);
+----
+fin.orders.amount	{"value": "flow"}	green	current
+
+# --- function voices arrive through RETURNS: extraction lands a measurement, served beside the glosses
+
+query TTTTT
+SELECT min_max() FROM orders.amount;
+----
+min_max	fin.orders.amount	min_max	{"min":0.0,"max":4.5}	true
+
+query TTT
+SELECT subject, actor, body FROM GLOSSARY(orders.amount::min_max, all => true);
+----
+fin.orders.amount	function	{"min":0.0,"max":4.5}
+
+query TTT
+SELECT subject, aspect, value FROM GLOSSARY(orders.amount::min_max);
+----
+fin.orders.amount	min_max	{"min":0.0,"max":4.5}
+
+# a measurement is never glossed
+statement error
+GLOSS min_max ON orders.amount AS $${"min": 0}$$;
+----
+never glossed
+
+statement error
+GLOSS nothing ON orders.amount AS $${}$$;
+----
+aspect 'nothing' is not declared
+
+# --- BY gates the speakers
+
+statement ok
+DECLARE ASPECT note WITH $${"type": "object"}$$ AS FACT ON TABLE;
+
+statement ok
+DECLARE WITNESS note_w ON note BY (HUMAN);
+
+statement error
+GLOSS note ON orders AS $${"value": "x"}$$;
+----
+admits HUMAN, not agent
+
+statement ok
+SET VARIABLE gloss_actor = 'human';
+
+statement ok
+GLOSS note ON orders AS $${"value": "x"}$$;
+
+statement ok
+RESET VARIABLE gloss_actor;
+
+# a witness without a detector judges nothing: the slot serves as current
+query TTTTT
+SELECT subject, aspect, value, band, state FROM GLOSSARY(orders::note);
+----
+fin.orders	note	{"value": "x"}	NULL	current
+
+# --- a detector that cannot answer is the verdict `error` (SPEC §7.2): one row per subject holding slots, score 0, the failure text
+
+statement ok
+DECLARE ASPECT role WITH $${"type": "object"}$$ AS FACT ON COLUMN;
+
+statement ok
+DECLARE FUNCTION broken FOR fin AS $$ SELECT subject, no_such_column AS band, 0.0 AS score FROM slots $$;
+
+statement ok
+DECLARE WITNESS role_w ON role DETECTOR broken;
+
+statement ok
+GLOSS role ON orders.id AS $${"value": "key"}$$;
+
+# a plan the engine refuses
+query TTTR
+SELECT witness, band, error, score FROM ATTEST(orders.id::role);
+----
+role_w	error	Binder Error: Referenced column "no_such_column" not found in FROM clause!	0.0
+
+# an error is not a judgment: the collapse serves the value, never withholds on it
+query TTTT
+SELECT subject, value, band, state FROM GLOSSARY(orders.id::role);
+----
+fin.orders.id	{"value": "key"}	error	current
+
+# every other witness still speaks
+query TTTT
+SELECT subject, witness, band, error FROM ATTEST(orders);
+----
+fin.orders.amount	behavior_w	green	NULL
+fin.orders.id	role_w	error	Binder Error: Referenced column "no_such_column" not found in FROM clause!
+
+# a run the engine refuses
+statement ok
+DECLARE FUNCTION broken FOR fin AS $$ SELECT subject, error('boom') AS band, 0.0 AS score FROM slots $$;
+
+query TT
+SELECT band, error FROM ATTEST(orders.id::role);
+----
+error	Invalid Input Error: boom
+
+# a row outside the attest schema
+statement ok
+DECLARE FUNCTION broken FOR fin AS $$ SELECT subject, 'blue' AS band, 0.0 AS score FROM slots $$;
+
+query TT
+SELECT band, error FROM ATTEST(orders.id::role);
+----
+error	detector broken served (fin.orders.id, blue, 0.0), outside the attest schema
+
+# no row where nobody spoke: the error is served on subjects holding slots
+query I
+SELECT count(*) FROM ATTEST(orders.amount::role);
+----
+0
