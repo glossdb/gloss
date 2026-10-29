@@ -33,6 +33,15 @@ build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 target_link_libraries(${EXTENSION_NAME} duckdb_yyjson)
 target_link_libraries(${LOADABLE_EXTENSION_NAME} duckdb_yyjson)
 
+# A deprecated DuckDB call fails the build, not a later lint
+if(NOT MSVC)
+  foreach(target ${EXTENSION_NAME} ${LOADABLE_EXTENSION_NAME})
+    target_compile_options(
+      ${target} PRIVATE -Wall -Wextra -Wno-unused-parameter
+                        -Werror=deprecated-declarations)
+  endforeach()
+endif()
+
 # Link OpenSSL in both the static library as the loadable extension
 
 install(

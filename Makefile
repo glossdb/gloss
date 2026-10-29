@@ -7,18 +7,6 @@ EXT_CONFIG=${PROJ_DIR}extension_config.cmake
 # Include the Makefile from extension-ci-tools
 include extension-ci-tools/makefiles/duckdb_extension.Makefile
 
-# The workspace is a DuckLake, installed rather than built: INSTALL ducklake
-# once with any DuckDB of this version, then `make lake` builds and copies it
-# where the test runner looks (the build's extension repository, regenerated
-# by every build)
-lake: release
-	@for dir in build/release/repository/*/*/; do \
-		rel=$${dir#build/release/repository/}; \
-		if [ -f "$(HOME)/.duckdb/extensions/$${rel}ducklake.duckdb_extension" ]; then \
-			cp "$(HOME)/.duckdb/extensions/$${rel}ducklake.duckdb_extension" "$$dir" && echo "ducklake -> $$dir"; \
-		fi; \
-	done
-
 # Lint: the pipeline's format and tidy checks, run here. `make lint-tools`
 # makes the project venv once (uv). The pipeline pins clang-format 11, which
 # has no arm64 build, so the local format pass runs the venv's clang-format

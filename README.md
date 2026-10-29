@@ -102,18 +102,16 @@ door to it.
 ```sh
 git submodule update --init --depth 1      # duckdb at v2.0.0, extension-ci-tools
 git -C duckdb fetch --depth 1 origin tag v2.0.0   # the tag is the version the extension repository serves
-GEN=ninja make lake                         # build/release/duckdb, build/release/extension/gloss/, ducklake beside them
+GEN=ninja make                              # build/release/duckdb, build/release/extension/gloss/, ducklake beside it
 ./build/release/test/unittest "test/sql/gloss*"
 ./build/release/duckdb -unsigned           # LOAD 'build/release/extension/gloss/gloss.duckdb_extension'
 make lint-tools                            # once: a project .venv with clang-format, clang-tidy, black, cmake-format (uv)
 GEN=ninja make lint                         # the pipeline's format and tidy checks plus unused includes; `make lint-fix` applies the formatter
 ```
 
-DuckLake is installed, not built: `INSTALL ducklake` once on any DuckDB
-2.0.0 (your CLI, or the one the build makes) puts it under
-`~/.duckdb/extensions/v2.0.0/`, and `make lake` copies it where the test
-runner looks, the build's extension repository, which every build
-regenerates. A build directory configured before the tag was fetched calls
+DuckLake is built with the extension, from the commit DuckDB 2.0.0 pins,
+as a loadable in the build's extension repository, where the test runner
+looks. A build directory configured before the tag was fetched calls
 itself a dev version and looks for the wrong key: `OVERRIDE_GIT_DESCRIBE=v2.0.0`
 in front of `make` sets it right.
 
