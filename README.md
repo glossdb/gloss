@@ -102,6 +102,7 @@ door to it.
 ```sh
 git submodule update --init --depth 1      # duckdb at v2.0.0, extension-ci-tools
 git -C duckdb fetch --depth 1 origin tag v2.0.0   # the tag is the version the extension repository serves
+brew install croaring                       # ducklake's one dependency; the pipeline takes it from vcpkg.json
 GEN=ninja make                              # build/release/duckdb, build/release/extension/gloss/, ducklake beside it
 ./build/release/test/unittest "test/sql/gloss*"
 ./build/release/duckdb -unsigned           # LOAD 'build/release/extension/gloss/gloss.duckdb_extension'
